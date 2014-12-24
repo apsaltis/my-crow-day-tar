@@ -25,14 +25,15 @@ public class W3CMicrodataToRDFExtractionTests {
     public void runTest(String name, URL src, URL result) throws IOException, RDFParseException, RDFHandlerException {
         logger.debug("run Test method called with {} , {}, {}", name, src, result);
         Document doc = Jsoup.parse(src.openStream(),"UTF-8",src.toString());
-        Model actual = Extractor.extract(doc);
+        RDFMicrodataParser ex = new RDFMicrodataParser();
+        Model actual = ex.extract(doc);
         Model expected = RDFValidationTestRunner.parseTurtle(result.openStream(),result.toString());
         compareModels(doc, actual, expected);
     }
 
     private void compareModels(Document doc, Model actual, Model expected) {
-        logger.debug("doc:\n{}", doc);
-        logger.debug("model:\n{}", expected);
+       // logger.debug("doc:\n{}", doc);
+       // logger.debug("model:\n{}", expected);
 
         boolean b = ModelUtil.equals(expected, actual);
         if(!b) {
