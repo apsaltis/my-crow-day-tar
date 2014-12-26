@@ -81,7 +81,8 @@ public class MicrodataRegistry {
 
     public MicrodataRegistry()  {
         try {
-            initRegistry(defaultRegisryURL);
+            URL url = getClass().getResource("/ns/md.json");
+            initRegistry(url);
         } catch (IOException e) {
             logger.error("Caught Exception", e); //To change body of catch statement use File | Settings | File Templates.
         }
