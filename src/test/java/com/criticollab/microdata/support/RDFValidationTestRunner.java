@@ -27,6 +27,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 public class RDFValidationTestRunner extends Runner {
+    private static final String RDFT = "http://www.w3.org/ns/rdftest#";
     @SuppressWarnings("UnusedDeclaration")
     private static Logger logger = LoggerFactory.getLogger(RDFValidationTestRunner.class);
 
@@ -37,6 +38,7 @@ public class RDFValidationTestRunner extends Runner {
     private Method testMethod;
     private static final String MF_BASE = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#";
     private static final ValueFactory vf = ValueFactoryImpl.getInstance();
+    private static final URI RDFT_REGISTRY = vf.createURI(RDFT, "registry");
     private static final URI MF_RESULT = vf.createURI(MF_BASE, "result");
     private static final URI MF_ACTION = vf.createURI(MF_BASE, "action");
     private static final URI MF_MANIFEST = vf.createURI(MF_BASE, "Manifest");
@@ -48,7 +50,7 @@ public class RDFValidationTestRunner extends Runner {
 
     public RDFValidationTestRunner(Class testClass) throws IllegalAccessException, InstantiationException, NoSuchMethodException, RDFParseException, IOException, RDFHandlerException {
         this.testClass = testClass;
-        testMethod = testClass.getMethod("runTest", String.class, URL.class, URL.class);
+        testMethod = testClass.getMethod("runTest", String.class, URL.class, URL.class,URL.class);
         testInstance = testClass.newInstance();
         ManifestPath manipath = (ManifestPath) testClass.getAnnotation(ManifestPath.class);
         manifestResourcePath = manipath.value();
@@ -103,13 +105,22 @@ public class RDFValidationTestRunner extends Runner {
         String name = getValue(model, entry, MF_NAME).stringValue();
         Resource action = (Resource) getValue(model, entry, MF_ACTION);
         Resource result = (Resource) getValue(model, entry, MF_RESULT);
-        logger.debug("name {}, comment {}, action {}, result {}", name, comment, action, result);
+        Value registry = getValue(model, entry, RDFT_REGISTRY) ;
         String prettyName = String.format("%s: %s", name, comment);
         Description testDescription = Description.createTestDescription(testClass, prettyName);
         suiteDescription.addChild(testDescription);
         URL actionURL = new URL(action.stringValue());
         URL resultURL = new URL(result.stringValue());
-        if (testCases.put(testDescription, new ManifestTestEntry(name, comment, actionURL, resultURL)) != null) {
+        URL registryURL = null;
+        if(registry != null) {
+            String registryString=null;
+            registryString = registry.stringValue();
+            registryURL = new URL(registryString);
+        }   else {
+            registryURL = testClass.getResource("/w3c-microdata-rdf-tests/test-registry.json");
+        }
+        logger.debug("name {}, comment {}, action {}, result {}, registry {}, registry {}", name, comment, action, result, registry,registryURL);
+        if (testCases.put(testDescription, new ManifestTestEntry(name, comment, actionURL, resultURL,registryURL)) != null) {
             throw new IllegalStateException("already had a test case named " + name);
         }
         ;
@@ -138,7 +149,7 @@ public class RDFValidationTestRunner extends Runner {
             URL src = testCase.getAction();
             URL expected = testCase.getResult();
             try {
-                testMethod.invoke(testInstance, testCase.getName(), src, expected);
+                testMethod.invoke(testInstance, testCase.getName(), src, expected,testCase.getRegistry());
             } catch (InvocationTargetException e) {
                 //logger.error("Caught Exception", e); //To change body of catch statement use File | Settings | File Templates.
                 Failure failure = new Failure(testDescription, e.getCause());
@@ -161,12 +172,14 @@ public class RDFValidationTestRunner extends Runner {
         String comment;
         URL action;
         URL result;
+        private URL registry;
 
-        public ManifestTestEntry(String name, String comment, URL action, URL result) {
+        public ManifestTestEntry(String name, String comment, URL action, URL result, URL registry) {
             this.name = name;
             this.comment = comment;
             this.action = action;
             this.result = result;
+            this.registry = registry;
         }
 
         public String getName() {
@@ -187,5 +200,8 @@ public class RDFValidationTestRunner extends Runner {
         }
 
 
+        public URL getRegistry() {
+            return registry;
+        }
     }
 }

@@ -6,12 +6,10 @@ import org.apache.commons.io.input.ReaderInputStream;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.jsoup.nodes.Node;
 import org.jsoup.nodes.TextNode;
 import org.jsoup.select.Elements;
-import org.openrdf.model.Model;
-import org.openrdf.model.Resource;
-import org.openrdf.model.URI;
-import org.openrdf.model.Value;
+import org.openrdf.model.*;
 import org.openrdf.model.impl.LinkedHashModel;
 import org.openrdf.model.impl.ValueFactoryImpl;
 import org.openrdf.model.vocabulary.RDF;
@@ -29,8 +27,11 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
+import java.net.URL;
 import java.nio.charset.Charset;
 import java.util.*;
+
+import static org.openrdf.model.datatypes.XMLDatatypeUtil.*;
 
 public class RDFMicrodataParser extends RDFParserBase {
     private static final URI STANDARD_URI = ValueFactoryImpl.getInstance().createURI("http://www.w3.org/ns/formats/md");
@@ -41,6 +42,7 @@ public class RDFMicrodataParser extends RDFParserBase {
     private static final String CHARSET_NAME = "UTF_16BE";
     private static final Charset CHARSET = Charset.forName(CHARSET_NAME);
     private static final String ITEMID = "itemid";
+    private static final String[] SUBPROPERTY_REGISTRY_ATTRIBUTES = new String[]{"subPropertyOf", "equivalentProperty"};
     @SuppressWarnings("UnusedDeclaration")
     private static Logger logger = LoggerFactory.getLogger(RDFMicrodataParser.class);
 
@@ -62,12 +64,15 @@ public class RDFMicrodataParser extends RDFParserBase {
      * the prefixURI  for the current vocabulary, from the registry. Part of the evaluation context defined
      * in the microdata-to-rdf spec.
      */
-    private static final RioSetting<Boolean> FAIL_ON_RELATIVE_ITEMIDS = new RioSettingImpl<>("com.criticollab.microdata.fail-on-relative-itemids",
+    public static final RioSetting<Boolean> FAIL_ON_RELATIVE_ITEMIDS = new RioSettingImpl<>("com.criticollab.microdata.fail-on-relative-itemids",
             "Fail if relative ITEMID is encountered",
             Boolean.FALSE);
-    private static final RioSetting<Boolean> FAIL_ON_RELATIVE_ITEMTYPES = new RioSettingImpl<>("com.criticollab.microdata.fail-on-relative-itemtypes",
+    public static final RioSetting<Boolean> FAIL_ON_RELATIVE_ITEMTYPES = new RioSettingImpl<>("com.criticollab.microdata.fail-on-relative-itemtypes",
             "Fail if relative ITEMTYPE is encountered",
             Boolean.FALSE);
+    public static final RioSetting<URL> REGISTRY = new RioSettingImpl<>("com.criticollab.microdata.registry",
+            "Registry to use",
+            MicrodataRegistry.DEFAULT_REGISTRY_URL);
 
 
     /**
@@ -104,6 +109,7 @@ public class RDFMicrodataParser extends RDFParserBase {
      */
     @Override
     public void parse(InputStream in, String baseURI) throws IOException, RDFParseException, RDFHandlerException {
+
         parse(in, null, baseURI);
     }
 
@@ -127,8 +133,9 @@ public class RDFMicrodataParser extends RDFParserBase {
 
     private void parse(InputStream in, String charsetName, String baseURI) throws IOException, RDFHandlerException, RDFParseException {
         setBaseURI(baseURI);
-        document = Jsoup.parse(in, charsetName, baseURI);
         try {
+            document = Jsoup.parse(in, charsetName, baseURI);
+            registry = new MicrodataRegistry(getParserConfig().get(REGISTRY));
             processDocument();
         } finally {
             clear();
@@ -141,18 +148,24 @@ public class RDFMicrodataParser extends RDFParserBase {
         super.clear();
         document = null;
         memory = null;
+        registry = null;
     }
 
 
-    public static Model extract(Document doc) throws RDFHandlerException, RDFParseException {
-        RDFMicrodataParser parser = new RDFMicrodataParser();
-        parser.document = doc;
-        parser.setBaseURI(doc.baseUri());
-        Model model = new LinkedHashModel();
-        parser.setRDFHandler(new StatementCollector(model));
-        parser.processDocument();
-        parser.setRDFHandler(null);
-        return model;
+    public Model extract(Document doc) throws RDFHandlerException, RDFParseException, IOException {
+        document = doc;
+        Model model;
+        try {
+            setBaseURI(doc.baseUri());
+            registry = new MicrodataRegistry(getParserConfig().get(REGISTRY));
+            model = new LinkedHashModel();
+            setRDFHandler(new StatementCollector(model));
+            processDocument();
+            setRDFHandler(null);
+            return model;
+        } finally {
+            clear();
+        }
     }
 
     private void processDocument() throws RDFHandlerException, RDFParseException {
@@ -166,7 +179,7 @@ public class RDFMicrodataParser extends RDFParserBase {
 
 
     Resource processItem(Element itemElement, String currentItemType, String currentVocabulary) throws RDFParseException, RDFHandlerException {
-        logger.info("processing top level item in {} ", itemElement.nodeName());
+        logger.debug("processing top level item in {} ", itemElement.nodeName());
         /*
         1. If there is an entry for item in memory, then let subject be the subject of that entry.
         Otherwise, if item has a global identifier and that global identifier is an absolute URL,
@@ -237,13 +250,14 @@ public class RDFMicrodataParser extends RDFParserBase {
             6. If the registry contains a URI prefix that is a character for character match of type up to the
                length of the URI prefix, set vocab as that URI prefix.
         */
+        MicrodataRegistry.RegistryEntry registryEntry = null;
         String vocab = null;
         if (primaryMicrodataType != null) {
-            MicrodataRegistry.RegistryEntry registryEntry = getRegistry().match(primaryMicrodataType);
+            registryEntry = getRegistry().match(primaryMicrodataType);
 
             if (registryEntry != null) {
                 vocab = registryEntry.getPrefixURI();
-            } else if (primaryMicrodataType != null && primaryMicrodataType.length() > 0) {
+            } else if (primaryMicrodataType.length() > 0) {
        /* 7. Otherwise,if type is not empty, construct vocab by removing everything following the last
             SOLIDUS U +002F ("/") or NUMBER SIGN U +0023 ("#") from the path component of type.
         */
@@ -260,32 +274,63 @@ public class RDFMicrodataParser extends RDFParserBase {
         currentVocabulary = vocab;
         currentItemType = primaryMicrodataType;
         List<Element> itemProperties = findItemProperties(itemElement);
-        //            For each element element that has one or more property names and is one of the properties of the item item run the following substep:
+        //For each element element that has one or more property names and is one of the properties of the item item run the following substep:
         for (Element itemProperty : itemProperties) {
-            logger.info("itemProperty: {}" + itemProperty);
-            //              For each name in the element's property names, run the following substeps:
-            for (String name : itemProperty.attr("itemprop").split(" ")) {
-//              Let context be a copy of evaluation context with current type set to type.
-                //SES: let's not.
-//                  Let predicate be the result of generate predicate URI using context and name.
-                String predicate = generatePredicateURI(name, currentItemType, currentVocabulary);
-                Value value;
-                if (itemProperty.hasAttr("itemscope")) {
-                    // If value is an item, then generate the triples for value using context. Replace value by the subject returned from those steps.
-                    value = processItem(itemProperty, currentItemType, currentVocabulary);
-                } else {
-                    value = createValue(itemProperty);
-                }
-//                    Let value be the property value of element.
-//                    Generate the following triple:
-                rdfHandler.handleStatement(createStatement(subject, createURI(predicate), value));
-//            subject subject predicate predicate object value
-//            If an entry exists in the registry for name in the vocabulary associated with vocab having the key subPropertyOf or equivalentProperty, for each such value equiv, generate the following triple:
-//            subject subject predicate equiv object value
+            logger.trace("itemProperty: {}" + itemProperty);
+            // For each name in the element's property names, run the following substeps:
+            if (itemProperty.hasAttr("itemprop")) {
+                for (String name : itemProperty.attr("itemprop").split(" ")) {
+    //              Let context be a copy of evaluation context with current type set to type.
+                    //SES: let's not.
+    //                  Let predicate be the result of generate predicate URI using context and name.
+                    String predicate = generatePredicateURI(name, currentItemType, currentVocabulary);
+                    Value value;
+                    if (itemProperty.hasAttr("itemscope")) {
+                        // If value is an item, then generate the triples for value using context. Replace value by the subject returned from those steps.
+                        value = processItem(itemProperty, currentItemType, currentVocabulary);
+                    } else {
+                        value = createValue(itemProperty);
+                    }
+    //                    Let value be the property value of element.
+    //                    Generate the following triple:
+                    rdfHandler.handleStatement(createStatement(subject, createURI(predicate), value));
+    //            subject subject predicate predicate object value
+    //            If an entry exists in the registry for name in the vocabulary associated with vocab having the key subPropertyOf or equivalentProperty,
+    //            for each such value equiv, generate the following triple:
+    //            subject subject predicate equiv object value
+                    if (registryEntry != null) {
+                        for (String attr : SUBPROPERTY_REGISTRY_ATTRIBUTES) {
+                            List<String> equivs = registryEntry.getPropertyAttributeAsListOfStrings(name, attr);
+                            for (String equiv : equivs) {
+                                rdfHandler.handleStatement(createStatement(subject, createURI(equiv), value));
 
+                            }
+                        }
+                    }
+
+                }
             }
 
+            if (itemProperty.hasAttr("itemprop-reverse")) {
+                for (String name : itemProperty.attr("itemprop-reverse").split(" ")) {
+                    Value value;
+                    if (itemProperty.hasAttr("itemscope")) {
+                        // If value is an item, then generate the triples for value using context. Replace value by the subject returned from those steps.
+                        value = processItem(itemProperty, currentItemType, currentVocabulary);
+                    } else {
+                        value = createValue(itemProperty);
+                    }
+
+                    if (!(value instanceof Literal)) {
+                        String predicate = generatePredicateURI(name, currentItemType, currentVocabulary);
+                        rdfHandler.handleStatement(createStatement((Resource) value, createURI(predicate), subject));
+                    }
+                }
+
+            }
         }
+
+
         return subject;
     }
 
@@ -323,12 +368,6 @@ public class RDFMicrodataParser extends RDFParserBase {
             }
             //        If the element is a meter or data element.
 //                The value is a literal made from element.itemValue.
-//                If the value is a valid integer having the lexical form of xsd:integer [XMLSCHEMA11-2]
-//        The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#integer.
-//        If the value is a valid float number having the lexical form of xsd:double [XMLSCHEMA11-2]
-//        The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#double.
-//        Otherwise
-//        The value is a simple literal.
 
             case "meter":
             case "data": {
@@ -336,18 +375,18 @@ public class RDFMicrodataParser extends RDFParserBase {
                     throw new RDFParseException("missing value in " + element);
                 }
                 String value = element.attr("value");
-                try {
-                    long l = Long.parseLong(value);
+                if (isValidInteger(value)) {
+//                  If the value is a valid integer having the lexical form of xsd:integer [XMLSCHEMA11-2]
+//                  The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#integer.
                     return createLiteral(value, null, XMLSchema.INTEGER);
-                } catch (NumberFormatException e) {
-                }
-                try {
-                    double d = Double.parseDouble(value);
+                } else if (isValidDouble(value)) {
+//                  If the value is a valid float number having the lexical form of xsd:double [XMLSCHEMA11-2]
+//                  The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#double.
                     return createLiteral(value, null, XMLSchema.DOUBLE);
-                } catch (NumberFormatException e) {
-
+                } else {
+//                  The value is a simple literal.
+                    return createLiteral(value, null, null);
                 }
-                return createLiteral(value, null, null);
             }
 
 
@@ -356,31 +395,56 @@ public class RDFMicrodataParser extends RDFParserBase {
 //              @content attribute with language information set from the language of the property element.
 //              Otherwise, the value is a simple literal created from the value of the @content attribute.
             case "meta": {
-                if(!element.hasAttr("content")) {
+                if (!element.hasAttr("content")) {
                     throw new RDFParseException("Missing content in " + element);
                 }
-                return createLiteral(element.attr("content"),getLang(element),null);
+                return createLiteral(element.attr("content"), getLang(element), null);
             }
 
 //        If the element is a time element.
 //                The value is a literal made from element.itemValue.
-//                If the value is a valid date string having the lexical form of xsd:date [XMLSCHEMA11-2].
-//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#date.
-//        If the value is a valid time string having the lexical form of xsd:time [XMLSCHEMA11-2].
-//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#time.
-//        If the value is a valid local date and time string or valid global date and time string having the lexical form of xsd:dateTime [XMLSCHEMA11-2].
-//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#dateTime.
-//        If the value is a valid month string having the lexical form of xsd:gYearMonth [XMLSCHEMA11-2].
-//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#gYearMonth.
-//        If the value is a valid non-negative integer having the lexical form of xsd:gYear [XMLSCHEMA11-2].
-//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#gYear.
-//        If the value is a valid duration string having the lexical form of xsd:duration [XMLSCHEMA11-2].
-//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#duration.
 //        Otherwise
 //        If the element has a non-empty language, the value is a language-tagged string created from the value with language information set from the language of the property element. Otherwise, the value is a simple literal created from the value.
 //                NOTE
             case "time": {
-                return createLiteral(getTextContent(element),getLang(element),null);
+                URI datatype = null;
+                String value;
+                if (element.hasAttr("datetime")) {
+                    value = element.attr("datetime");
+                } else {
+                    value = getTextContent(element);
+                }
+                if (isValidDate(value)) {
+//                If the value is a valid date string having the lexical form of xsd:date [XMLSCHEMA11-2].
+//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#date.
+                    datatype = XMLSchema.DATE;
+                } else if (isValidTime(value)) {
+//                If the value is a valid time string having the lexical form of xsd:time [XMLSCHEMA11-2].
+//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#time.
+                    datatype = XMLSchema.TIME;
+                } else if (isValidDateTime(value)) {
+//                If the value is a valid local date and time string or valid global date and time string having the lexical form of xsd:dateTime [XMLSCHEMA11-2].
+//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#dateTime.
+
+                    datatype = XMLSchema.DATETIME;
+                } else if (isValidGYearMonth(value)) {
+//                  If the value is a valid month string having the lexical form of xsd:gYearMonth [XMLSCHEMA11-2].
+//                  The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#gYearMonth.
+
+                    datatype = XMLSchema.GYEARMONTH;
+                } else if (isValidGYear(value)) {
+//                If the value is a valid non-negative integer having the lexical form of xsd:gYear [XMLSCHEMA11-2].
+//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#gYear.
+
+                    datatype = XMLSchema.GYEAR;
+                } else if (isValidDuration(value)) {
+//                If the value is a valid duration string having the lexical form of xsd:duration [XMLSCHEMA11-2].
+//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#duration.
+                    datatype = XMLSchema.DURATION;
+                }
+                String lang = datatype != null ? null : getLang(element);
+                return createLiteral(value, lang, datatype);
+
             }
 //        The HTML valid yearless date string is similar to xsd:gMonthDay, but the lexical forms differ, so it is not included in this conversion.
 //
@@ -398,13 +462,22 @@ public class RDFMicrodataParser extends RDFParserBase {
 
     private String getTextContent(Element element) {
         StringBuilder buf = new StringBuilder();
-        for (TextNode node : element.textNodes()) {
-            buf.append(node.getWholeText());
-        }
-        if(!buf.toString().equals(element.text())) {
-            logger.info("gtc diff");
-        }
+        apppendTextContent(buf, element);
         return buf.toString();
+    }
+
+    private void apppendTextContent(StringBuilder buf, Node node) {
+        if (node instanceof Element) {
+            Element element = (Element) node;
+            for (Node child : element.childNodes()) {
+                apppendTextContent(buf, child);
+            }
+        } else if (node instanceof TextNode) {
+            TextNode textNode = (TextNode) node;
+            buf.append(textNode.getWholeText());
+        } else {
+            logger.info("ignoring node of type {}", node.getClass());
+        }
     }
 
     String generatePredicateURI(String name, String currentType, String currentVocabulary) {
@@ -479,6 +552,11 @@ public class RDFMicrodataParser extends RDFParserBase {
             String itemprop = current.attr("itemprop");
             if (itemprop.length() > 0) {
                 results.add(current);
+            } else {
+                String itempropReverse = current.attr("itemprop-reverse");
+                if (itempropReverse.length() > 0) {
+                    results.add(current);
+                }
             }
         }
 
@@ -489,13 +567,13 @@ public class RDFMicrodataParser extends RDFParserBase {
     }
 
     List<Element> findTopLevelItems(Document document) {
-        return document.select("[itemscope]:not([itemprop])");
+        return document.select("[itemscope]:not([itemprop]:not([itemprop-reverse])");
     }
 
     String getLang(Element element) {
         if (element.hasAttr("lang")) {
             String lang = element.attr("lang");
-            if(lang.length() ==0) {
+            if (lang.length() == 0) {
                 lang = null;
             }
             return lang;
@@ -516,9 +594,6 @@ public class RDFMicrodataParser extends RDFParserBase {
     }
 
     public MicrodataRegistry getRegistry() {
-        if (registry == null) {
-            registry = new MicrodataRegistry();
-        }
         return registry;
     }
 
