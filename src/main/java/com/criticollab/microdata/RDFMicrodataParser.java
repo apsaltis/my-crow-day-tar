@@ -6,11 +6,16 @@ import org.apache.commons.io.input.ReaderInputStream;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.jsoup.nodes.TextNode;
 import org.jsoup.select.Elements;
-import org.openrdf.model.*;
+import org.openrdf.model.Model;
+import org.openrdf.model.Resource;
+import org.openrdf.model.URI;
+import org.openrdf.model.Value;
 import org.openrdf.model.impl.LinkedHashModel;
 import org.openrdf.model.impl.ValueFactoryImpl;
 import org.openrdf.model.vocabulary.RDF;
+import org.openrdf.model.vocabulary.XMLSchema;
 import org.openrdf.rio.RDFFormat;
 import org.openrdf.rio.RDFHandlerException;
 import org.openrdf.rio.RDFParseException;
@@ -142,6 +147,7 @@ public class RDFMicrodataParser extends RDFParserBase {
     public static Model extract(Document doc) throws RDFHandlerException, RDFParseException {
         RDFMicrodataParser parser = new RDFMicrodataParser();
         parser.document = doc;
+        parser.setBaseURI(doc.baseUri());
         Model model = new LinkedHashModel();
         parser.setRDFHandler(new StatementCollector(model));
         parser.processDocument();
@@ -262,17 +268,17 @@ public class RDFMicrodataParser extends RDFParserBase {
 //              Let context be a copy of evaluation context with current type set to type.
                 //SES: let's not.
 //                  Let predicate be the result of generate predicate URI using context and name.
-                String predicate = generatePredicateURI(name,currentItemType,currentVocabulary);
-                Value value=null;
-                if(itemProperty.hasAttr("itemscope")) {
-             // If value is an item, then generate the triples for value using context. Replace value by the subject returned from those steps.
-                    value =  processItem(itemProperty,currentItemType,currentVocabulary);
-                }  else {
-                    value = getLiteralValue(itemProperty);
+                String predicate = generatePredicateURI(name, currentItemType, currentVocabulary);
+                Value value;
+                if (itemProperty.hasAttr("itemscope")) {
+                    // If value is an item, then generate the triples for value using context. Replace value by the subject returned from those steps.
+                    value = processItem(itemProperty, currentItemType, currentVocabulary);
+                } else {
+                    value = createValue(itemProperty);
                 }
 //                    Let value be the property value of element.
 //                    Generate the following triple:
-                rdfHandler.handleStatement(createStatement(subject,createURI(predicate),value));
+                rdfHandler.handleStatement(createStatement(subject, createURI(predicate), value));
 //            subject subject predicate predicate object value
 //            If an entry exists in the registry for name in the vocabulary associated with vocab having the key subPropertyOf or equivalentProperty, for each such value equiv, generate the following triple:
 //            subject subject predicate equiv object value
@@ -283,32 +289,147 @@ public class RDFMicrodataParser extends RDFParserBase {
         return subject;
     }
 
-    private Literal getLiteralValue(Element element) throws RDFParseException {
-        return createLiteral(element.text(), null, null);
+    private Value createValue(Element element) throws RDFParseException {
+//        If the element is a URL property element (a, area, audio, embed, iframe, img, link, object, source, track or video)
+//        The value is a URI reference created from element.itemValue. (See relevant attribute descriptions in [HTML5]).
+
+        switch (element.nodeName()) {
+            case "a":
+            case "area":
+            case "link": {
+                if (!element.hasAttr("href")) {
+                    throw new RDFParseException("missing href in " + element);
+                }
+                return resolveURI(element.attr("href"));
+            }
+            case "audio":
+            case "embed":
+            case "iframe":
+            case "img":
+            case "source":
+            case "track":
+            case "video": {
+                if (!element.hasAttr("src")) {
+                    throw new RDFParseException("missing src in " + element);
+                }
+                return resolveURI(element.attr("src"));
+            }
+            case "object": {
+                if (!element.hasAttr("data")) {
+                    throw new RDFParseException("missing data in " + element);
+                }
+                return resolveURI(element.attr("data"));
+
+            }
+            //        If the element is a meter or data element.
+//                The value is a literal made from element.itemValue.
+//                If the value is a valid integer having the lexical form of xsd:integer [XMLSCHEMA11-2]
+//        The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#integer.
+//        If the value is a valid float number having the lexical form of xsd:double [XMLSCHEMA11-2]
+//        The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#double.
+//        Otherwise
+//        The value is a simple literal.
+
+            case "meter":
+            case "data": {
+                if (!element.hasAttr("value")) {
+                    throw new RDFParseException("missing value in " + element);
+                }
+                String value = element.attr("value");
+                try {
+                    long l = Long.parseLong(value);
+                    return createLiteral(value, null, XMLSchema.INTEGER);
+                } catch (NumberFormatException e) {
+                }
+                try {
+                    double d = Double.parseDouble(value);
+                    return createLiteral(value, null, XMLSchema.DOUBLE);
+                } catch (NumberFormatException e) {
+
+                }
+                return createLiteral(value, null, null);
+            }
+
+
+//        If the element is a meta element with a @content attribute.
+//        If the element has a non-empty language, the value is a language-tagged string created from the value of the
+//              @content attribute with language information set from the language of the property element.
+//              Otherwise, the value is a simple literal created from the value of the @content attribute.
+            case "meta": {
+                if(!element.hasAttr("content")) {
+                    throw new RDFParseException("Missing content in " + element);
+                }
+                return createLiteral(element.attr("content"),getLang(element),null);
+            }
+
+//        If the element is a time element.
+//                The value is a literal made from element.itemValue.
+//                If the value is a valid date string having the lexical form of xsd:date [XMLSCHEMA11-2].
+//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#date.
+//        If the value is a valid time string having the lexical form of xsd:time [XMLSCHEMA11-2].
+//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#time.
+//        If the value is a valid local date and time string or valid global date and time string having the lexical form of xsd:dateTime [XMLSCHEMA11-2].
+//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#dateTime.
+//        If the value is a valid month string having the lexical form of xsd:gYearMonth [XMLSCHEMA11-2].
+//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#gYearMonth.
+//        If the value is a valid non-negative integer having the lexical form of xsd:gYear [XMLSCHEMA11-2].
+//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#gYear.
+//        If the value is a valid duration string having the lexical form of xsd:duration [XMLSCHEMA11-2].
+//                The value is a typed literal composed of the value and http://www.w3.org/2001/XMLSchema#duration.
+//        Otherwise
+//        If the element has a non-empty language, the value is a language-tagged string created from the value with language information set from the language of the property element. Otherwise, the value is a simple literal created from the value.
+//                NOTE
+            case "time": {
+                return createLiteral(getTextContent(element),getLang(element),null);
+            }
+//        The HTML valid yearless date string is similar to xsd:gMonthDay, but the lexical forms differ, so it is not included in this conversion.
+//
+//                See The time element in [HTML5].
+//
+//        Otherwise
+//        If the element has a non-empty language, the value is a language-tagged string created from the value with language information set from the language of the property element. Otherwise, the value is a simple literal created from the value.
+//                See The lang and xml:lang attributes in [HTML5] for determining the language of a node.
+
+
+            default:
+                return createLiteral(getTextContent(element), getLang(element), null);
+        }
     }
 
-    String generatePredicateURI(String name, String currentType,String currentVocabulary) {
+    private String getTextContent(Element element) {
+        StringBuilder buf = new StringBuilder();
+        for (TextNode node : element.textNodes()) {
+            buf.append(node.getWholeText());
+        }
+        if(!buf.toString().equals(element.text())) {
+            logger.info("gtc diff");
+        }
+        return buf.toString();
+    }
+
+    String generatePredicateURI(String name, String currentType, String currentVocabulary) {
 //        If name is an absolute URL, return name as a URI reference.
         ParsedURI parsedURI = new ParsedURI(name);
-        if(parsedURI.isAbsolute()) {
+        if (parsedURI.isAbsolute()) {
             return name;
         }
 
 //        If current type from context is null, there can be no current vocabulary. Return the URI reference that is the document base with its fragment set to the canonicalized fragment value of name.
 
-        if(currentType == null) {
+        if (currentType == null) {
             return document.baseUri() + ("#") + name;
         }
 //        Set expandedURI to the URI reference constructed by appending the canonicalized fragment value of name to current vocabulary, separated by a U+0023 NUMBER SIGN character ("#") unless the current vocabulary ends with either a U+0023 NUMBER SIGN character ("#") or SOLIDUS U+002F ("/").
 //                Return expandedURI.
         //TODO:FIXME
-        if(currentVocabulary.endsWith("/") || currentVocabulary.endsWith("#")) {
+        if (currentVocabulary.endsWith("/") || currentVocabulary.endsWith("#")) {
             return currentVocabulary + name;
         } else {
             return currentVocabulary + "#" + name;
         }
 
     }
+
     List<Element> findItemProperties(Element root) {
 //        Let results, memory, and pending be empty lists of elements.
 //
@@ -324,13 +445,13 @@ public class RDFMicrodataParser extends RDFParserBase {
 //
 //        If root has an itemref attribute, split the value of that itemref attribute on spaces.
 
-        if(root.hasAttr("itemref")) {
+        if (root.hasAttr("itemref")) {
             String ids[] = root.attr("itemref").split(" ");
             // For each resulting token ID, if there is an element in the home subtree of root with the ID ID,
             // then add the first such element to pending.
             for (String id : ids) {
                 Elements foundIds = document.select(String.format("[id=%s]", id));
-                if(foundIds.size() >0) {
+                if (foundIds.size() > 0) {
                     pending.add(foundIds.get(0));
                 }
             }
@@ -338,33 +459,33 @@ public class RDFMicrodataParser extends RDFParserBase {
 
 
 //                Loop: If pending is empty, jump to the step labeled end of loop.
-           while(!pending.isEmpty()) {
+        while (!pending.isEmpty()) {
 //                Remove an element from pending and let current be that element.
-               Element current = pending.remove();
+            Element current = pending.remove();
 //        If current is already in memory, there is a microdata error; return to the step labeled loop.
 //        Add current to memory.
 
-               if(!memory.add(current)) {
-                  continue;
-               }
+            if (!memory.add(current)) {
+                continue;
+            }
 //
 //
 //        If current does not have an itemscope attribute, then: add all the child elements of current to pending.
-               if(!current.hasAttr("itemscope"))    {
-                   pending.addAll(current.children());
-               }
+            if (!current.hasAttr("itemscope")) {
+                pending.addAll(current.children());
+            }
 //       If current has an itemprop attribute specified and has one or more property names, then add current to results.
 //
-               String itemprop = current.attr("itemprop");
-               if(itemprop.length() >0) {
-                   results.add(current);
-               }
-           }
+            String itemprop = current.attr("itemprop");
+            if (itemprop.length() > 0) {
+                results.add(current);
+            }
+        }
 
 //        End of loop: Sort results in tree order.
 //                Return results.
 //
-       return results;
+        return results;
     }
 
     List<Element> findTopLevelItems(Document document) {
@@ -373,11 +494,15 @@ public class RDFMicrodataParser extends RDFParserBase {
 
     String getLang(Element element) {
         if (element.hasAttr("lang")) {
-            return element.attr("lang");
+            String lang = element.attr("lang");
+            if(lang.length() ==0) {
+                lang = null;
+            }
+            return lang;
         } else if (element.parent() != null) {
             return getLang((element.parent()));
         } else {
-            return "";
+            return null;
         }
     }
 

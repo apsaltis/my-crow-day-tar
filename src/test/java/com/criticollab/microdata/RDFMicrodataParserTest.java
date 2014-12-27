@@ -53,8 +53,8 @@ public class RDFMicrodataParserTest {
         checkLangOfElement(ex, ".e1", "es");
         checkLangOfElement(ex, ".e2", "en");
         checkLangOfElement(ex, ".e3", "de");
-        checkLangOfElement(ex, ".e4", "");
-        checkLangOfElement(ex, "html", "");
+        checkLangOfElement(ex, ".e4", null);
+        checkLangOfElement(ex, "html", null);
 
     }
 
