@@ -109,9 +109,9 @@ public class MicrodataRegistry {
                 }
                 registryEntries.add(registryEntry);
             }
-            if (logger.isInfoEnabled()) {
+            if (logger.isDebugEnabled()) {
                 for (RegistryEntry registryEntry : registryEntries) {
-                    logger.info("registry entry {}", registryEntry);
+                    logger.debug("registry entry {}", registryEntry);
                 }
             }
             logger.debug("registry entries: {}", registryEntries);

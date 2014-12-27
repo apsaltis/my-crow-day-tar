@@ -6,9 +6,8 @@ import org.apache.commons.io.input.ReaderInputStream;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
-import org.openrdf.model.Model;
-import org.openrdf.model.Resource;
-import org.openrdf.model.URI;
+import org.jsoup.select.Elements;
+import org.openrdf.model.*;
 import org.openrdf.model.impl.LinkedHashModel;
 import org.openrdf.model.impl.ValueFactoryImpl;
 import org.openrdf.model.vocabulary.RDF;
@@ -154,7 +153,7 @@ public class RDFMicrodataParser extends RDFParserBase {
         memory = new IdentityHashMap<>();
         getRDFHandler().startRDF();
         for (Element element : findTopLevelItems(document)) {
-            processItem(element, "", "");
+            processItem(element, null, null);
         }
         getRDFHandler().endRDF();
     }
@@ -204,7 +203,7 @@ public class RDFMicrodataParser extends RDFParserBase {
         if (itemElement.hasAttr("itemtype"))
 
         {
-            String[] itemtypes = itemElement.attr("itemtype").split("\\s");
+            String[] itemtypes = itemElement.attr("itemtype").split(" ");
             for (String itemtype : itemtypes) {
                 ParsedURI uri = new ParsedURI(itemtype);
                 if (!uri.isAbsolute()) {
@@ -232,29 +231,140 @@ public class RDFMicrodataParser extends RDFParserBase {
             6. If the registry contains a URI prefix that is a character for character match of type up to the
                length of the URI prefix, set vocab as that URI prefix.
         */
-        String vocab = "";
+        String vocab = null;
         if (primaryMicrodataType != null) {
             MicrodataRegistry.RegistryEntry registryEntry = getRegistry().match(primaryMicrodataType);
 
             if (registryEntry != null) {
                 vocab = registryEntry.getPrefixURI();
-            } else if (primaryMicrodataType != null && primaryMicrodataType.length()>0){
+            } else if (primaryMicrodataType != null && primaryMicrodataType.length() > 0) {
        /* 7. Otherwise,if type is not empty, construct vocab by removing everything following the last
             SOLIDUS U +002F ("/") or NUMBER SIGN U +0023 ("#") from the path component of type.
         */
                 int index = primaryMicrodataType.lastIndexOf('#');
                 if (index != -1) {
-                    vocab = primaryMicrodataType.substring(0, index+1);
+                    vocab = primaryMicrodataType.substring(0, index + 1);
                 } else {
                     index = primaryMicrodataType.lastIndexOf('/');
                     if (index != -1)
-                        vocab = primaryMicrodataType.substring(0, index+1);
+                        vocab = primaryMicrodataType.substring(0, index + 1);
                 }
             }
         }
         currentVocabulary = vocab;
+        currentItemType = primaryMicrodataType;
+        List<Element> itemProperties = findItemProperties(itemElement);
+        //            For each element element that has one or more property names and is one of the properties of the item item run the following substep:
+        for (Element itemProperty : itemProperties) {
+            logger.info("itemProperty: {}" + itemProperty);
+            //              For each name in the element's property names, run the following substeps:
+            for (String name : itemProperty.attr("itemprop").split(" ")) {
+//              Let context be a copy of evaluation context with current type set to type.
+                //SES: let's not.
+//                  Let predicate be the result of generate predicate URI using context and name.
+                String predicate = generatePredicateURI(name,currentItemType,currentVocabulary);
+                Value value=null;
+                if(itemProperty.hasAttr("itemscope")) {
+             // If value is an item, then generate the triples for value using context. Replace value by the subject returned from those steps.
+                    value =  processItem(itemProperty,currentItemType,currentVocabulary);
+                }  else {
+                    value = getLiteralValue(itemProperty);
+                }
+//                    Let value be the property value of element.
+//                    Generate the following triple:
+                rdfHandler.handleStatement(createStatement(subject,createURI(predicate),value));
+//            subject subject predicate predicate object value
+//            If an entry exists in the registry for name in the vocabulary associated with vocab having the key subPropertyOf or equivalentProperty, for each such value equiv, generate the following triple:
+//            subject subject predicate equiv object value
 
+            }
+
+        }
         return subject;
+    }
+
+    private Literal getLiteralValue(Element element) throws RDFParseException {
+        return createLiteral(element.text(), null, null);
+    }
+
+    String generatePredicateURI(String name, String currentType,String currentVocabulary) {
+//        If name is an absolute URL, return name as a URI reference.
+        ParsedURI parsedURI = new ParsedURI(name);
+        if(parsedURI.isAbsolute()) {
+            return name;
+        }
+
+//        If current type from context is null, there can be no current vocabulary. Return the URI reference that is the document base with its fragment set to the canonicalized fragment value of name.
+
+        if(currentType == null) {
+            return document.baseUri() + ("#") + name;
+        }
+//        Set expandedURI to the URI reference constructed by appending the canonicalized fragment value of name to current vocabulary, separated by a U+0023 NUMBER SIGN character ("#") unless the current vocabulary ends with either a U+0023 NUMBER SIGN character ("#") or SOLIDUS U+002F ("/").
+//                Return expandedURI.
+        //TODO:FIXME
+        if(currentVocabulary.endsWith("/") || currentVocabulary.endsWith("#")) {
+            return currentVocabulary + name;
+        } else {
+            return currentVocabulary + "#" + name;
+        }
+
+    }
+    List<Element> findItemProperties(Element root) {
+//        Let results, memory, and pending be empty lists of elements.
+//
+        List<Element> results = new ArrayList<>();
+        Set<Element> memory = new HashSet<>();
+        Queue<Element> pending = new ArrayDeque<>();
+        //        Add the element root to memory.
+        memory.add(root);
+//
+//        Add the child elements of root, if any, to pending.
+        pending.addAll(root.children());
+
+//
+//        If root has an itemref attribute, split the value of that itemref attribute on spaces.
+
+        if(root.hasAttr("itemref")) {
+            String ids[] = root.attr("itemref").split(" ");
+            // For each resulting token ID, if there is an element in the home subtree of root with the ID ID,
+            // then add the first such element to pending.
+            for (String id : ids) {
+                Elements foundIds = document.select(String.format("[id=%s]", id));
+                if(foundIds.size() >0) {
+                    pending.add(foundIds.get(0));
+                }
+            }
+        }
+
+
+//                Loop: If pending is empty, jump to the step labeled end of loop.
+           while(!pending.isEmpty()) {
+//                Remove an element from pending and let current be that element.
+               Element current = pending.remove();
+//        If current is already in memory, there is a microdata error; return to the step labeled loop.
+//        Add current to memory.
+
+               if(!memory.add(current)) {
+                  continue;
+               }
+//
+//
+//        If current does not have an itemscope attribute, then: add all the child elements of current to pending.
+               if(!current.hasAttr("itemscope"))    {
+                   pending.addAll(current.children());
+               }
+//       If current has an itemprop attribute specified and has one or more property names, then add current to results.
+//
+               String itemprop = current.attr("itemprop");
+               if(itemprop.length() >0) {
+                   results.add(current);
+               }
+           }
+
+//        End of loop: Sort results in tree order.
+//                Return results.
+//
+       return results;
     }
 
     List<Element> findTopLevelItems(Document document) {
